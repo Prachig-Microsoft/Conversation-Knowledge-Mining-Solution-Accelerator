@@ -210,13 +210,25 @@ function Invoke-DataCleanup {
     # Clear existing demo data (documents, insights cache) and any external data source
     # registrations so every scenario starts from a clean slate.
     Write-Host "Clearing existing data and external source connections for scenario isolation..." -ForegroundColor Yellow
-    try {
-        Invoke-RestMethod -Uri "$BackendUrl/api/ingestion/clear?include_external=true" -Method DELETE -Headers $Headers | Out-Null
-        Write-Host "Previous data and external source registrations cleared." -ForegroundColor Green
-    } catch {
-        Write-Host "ERROR: Could not clear existing data before scenario load: $_" -ForegroundColor Red
-        Write-Host "Aborting to prevent mixed data across use cases." -ForegroundColor Yellow
-        exit 1
+    $maxAttempts = 5
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            Invoke-RestMethod -Uri "$BackendUrl/api/ingestion/clear?include_external=true" -Method DELETE -Headers $Headers | Out-Null
+            Write-Host "Previous data and external source registrations cleared." -ForegroundColor Green
+            return
+        } catch {
+            $statusCode = $null
+            if ($_.Exception.Response) { $statusCode = [int]$_.Exception.Response.StatusCode }
+            $isTransient = ($statusCode -eq 503 -or $statusCode -eq 502 -or $statusCode -eq 504 -or -not $statusCode)
+            if ($isTransient -and $attempt -lt $maxAttempts) {
+                Write-Host "Backend not ready yet (attempt $attempt/$maxAttempts) — retrying in 10s..." -ForegroundColor Yellow
+                Start-Sleep -Seconds 10
+                continue
+            }
+            Write-Host "ERROR: Could not clear existing data before scenario load: $_" -ForegroundColor Red
+            Write-Host "Aborting to prevent mixed data across use cases." -ForegroundColor Yellow
+            exit 1
+        }
     }
 }
 
@@ -314,9 +326,9 @@ if (-not $Scenario -and -not $DataPath -and -not $UseSampleData -and -not $Exter
             Invoke-EnsureSearchIndex
             Write-Host ""
             Write-Host "Creating default AI agent with SQL and Azure AI Search tools..." -ForegroundColor Yellow
-            & (Join-Path $PSScriptRoot "setup-agent.ps1") -Scenario "skip"
+            & (Join-Path $PSScriptRoot "setup-agent.ps1") -Scenario "skip" -ResourceGroupName $ResourceGroupName
             if ($LASTEXITCODE -ne 0) {
-                Write-Host "WARNING: Agent setup failed — retry with: ./infra/scripts/post-provision/setup-agent.ps1 -Scenario skip" -ForegroundColor Yellow
+                Write-Host "WARNING: Agent setup failed — retry with: ./infra/scripts/post-provision/setup-agent.ps1 -Scenario skip -ResourceGroupName $ResourceGroupName" -ForegroundColor Yellow
             }
             exit $LASTEXITCODE
         }
@@ -549,8 +561,8 @@ Write-Host ""
 if ($Scenario) {
     Write-Host ""
     Write-Host "Creating scenario-based AI agent for '$Scenario'..." -ForegroundColor Yellow
-    & (Join-Path $PSScriptRoot "setup-agent.ps1") -Scenario $Scenario
+    & (Join-Path $PSScriptRoot "setup-agent.ps1") -Scenario $Scenario -ResourceGroupName $ResourceGroupName
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "WARNING: Agent setup failed — retry with: ./infra/scripts/post-provision/setup-agent.ps1 -Scenario $Scenario" -ForegroundColor Yellow
+        Write-Host "WARNING: Agent setup failed — retry with: ./infra/scripts/post-provision/setup-agent.ps1 -Scenario $Scenario -ResourceGroupName $ResourceGroupName" -ForegroundColor Yellow
     }
 }
