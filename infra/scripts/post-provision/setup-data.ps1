@@ -23,6 +23,9 @@
 
     # Connect Azure AI Search index
     ./infra/scripts/post-provision/setup-data.ps1 -ExternalSource azure_search -Name "My Index" -Endpoint "https://my-search.search.windows.net" -Table "my-index"
+
+    # AVM / non-azd deployment — auto-discover the API App Service URL from the resource group
+    ./infra/scripts/post-provision/setup-data.ps1 -Scenario contact-center -ResourceGroupName "my-rg"
 #>
 
 param(
@@ -42,6 +45,7 @@ param(
     [string]$Table,
     [string]$ConnectionString,
 
+    [string]$ResourceGroupName,
     [string]$BackendUrl = "http://localhost:8000",
     [switch]$AllowDeployedFallback
 )
@@ -69,6 +73,19 @@ function Get-DeployValue {
         if ($line) { return ($line -replace "^$Name=", '').Trim() }
     }
     return ""
+}
+
+# Auto-discover the API App Service's URL from a resource group (non-azd / AVM-based
+# deployments) - matches an app whose name starts with "api-".
+function Get-DiscoveredBackendUrl([string]$rg) {
+    if (-not $rg) { return "" }
+    $names = (az webapp list --resource-group $rg --query "[].name" -o tsv 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $names) { return "" }
+    $apiName = (($names -split "`n") | Where-Object { $_ -like "api-*" } | Select-Object -First 1).Trim()
+    if (-not $apiName) { return "" }
+    $hostName = (az webapp show --resource-group $rg --name $apiName --query "defaultHostName" -o tsv 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $hostName) { return "" }
+    return "https://$($hostName.Trim())"
 }
 
 # ── Load scenarios config (used by interactive menu and scenario resolution) ──
@@ -114,6 +131,16 @@ function Resolve-ScenarioDataPath {
 # ── Resolve backend URL ──
 if ($PSBoundParameters.ContainsKey("BackendUrl")) {
     Write-Host "Using explicit backend: $BackendUrl" -ForegroundColor Yellow
+}
+elseif ($ResourceGroupName) {
+    $discoveredUrl = Get-DiscoveredBackendUrl $ResourceGroupName
+    if ($discoveredUrl) {
+        $BackendUrl = $discoveredUrl
+        Write-Host "Using backend discovered from resource group '$ResourceGroupName': $BackendUrl" -ForegroundColor Yellow
+    } else {
+        Write-Host "ERROR: Could not discover an API App Service (name prefix 'api-') in resource group '$ResourceGroupName'." -ForegroundColor Red
+        exit 1
+    }
 }
 elseif ($BackendUrl -eq "http://localhost:8000") {
     $localHealthy = $false
@@ -299,9 +326,9 @@ if (-not $Scenario -and -not $DataPath -and -not $UseSampleData -and -not $Exter
             Invoke-EnsureSearchIndex
             Write-Host ""
             Write-Host "Creating default AI agent with SQL and Azure AI Search tools..." -ForegroundColor Yellow
-            & (Join-Path $PSScriptRoot "setup-agent.ps1") -Scenario "skip"
+            & (Join-Path $PSScriptRoot "setup-agent.ps1") -Scenario "skip" -ResourceGroupName $ResourceGroupName
             if ($LASTEXITCODE -ne 0) {
-                Write-Host "WARNING: Agent setup failed — retry with: ./infra/scripts/post-provision/setup-agent.ps1 -Scenario skip" -ForegroundColor Yellow
+                Write-Host "WARNING: Agent setup failed — retry with: ./infra/scripts/post-provision/setup-agent.ps1 -Scenario skip -ResourceGroupName $ResourceGroupName" -ForegroundColor Yellow
             }
             exit $LASTEXITCODE
         }
@@ -534,8 +561,8 @@ Write-Host ""
 if ($Scenario) {
     Write-Host ""
     Write-Host "Creating scenario-based AI agent for '$Scenario'..." -ForegroundColor Yellow
-    & (Join-Path $PSScriptRoot "setup-agent.ps1") -Scenario $Scenario
+    & (Join-Path $PSScriptRoot "setup-agent.ps1") -Scenario $Scenario -ResourceGroupName $ResourceGroupName
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "WARNING: Agent setup failed — retry with: ./infra/scripts/post-provision/setup-agent.ps1 -Scenario $Scenario" -ForegroundColor Yellow
+        Write-Host "WARNING: Agent setup failed — retry with: ./infra/scripts/post-provision/setup-agent.ps1 -Scenario $Scenario -ResourceGroupName $ResourceGroupName" -ForegroundColor Yellow
     }
 }
