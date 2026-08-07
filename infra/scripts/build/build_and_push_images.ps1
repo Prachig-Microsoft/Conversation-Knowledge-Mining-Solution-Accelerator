@@ -6,22 +6,28 @@
 .DESCRIPTION
     Uses `az acr build` so the images are built remotely inside ACR — no local
     Docker is required. Configuration is resolved, in order of precedence, from:
-    1) explicit parameters (for non-azd / AVM-based deployments), 2) the azd
-    environment (ACR_NAME, ACR_LOGIN_SERVER, API_APP_NAME, FRONTEND_APP_NAME,
-    image names/tags, RESOURCE_GROUP_NAME) when azd is available, 3) built-in
-    defaults for image names/tags. After pushing, each App Service is pointed at
-    its ACR image and set to pull via managed identity, then restarted.
+    1) explicit parameters, 2) the azd environment (ACR_NAME, ACR_LOGIN_SERVER,
+    API_APP_NAME, FRONTEND_APP_NAME, image names/tags, RESOURCE_GROUP_NAME) when
+    azd is available, 3) auto-discovery from the resource group (for non-azd /
+    AVM-based deployments) - the ACR is discovered assuming a single registry in
+    the group, and the API/frontend App Services are discovered by their 'api-'
+    and 'app-' name prefixes, 4) built-in defaults for image names/tags. After
+    pushing, each App Service is pointed at its ACR image and set to pull via
+    managed identity, then restarted.
 .PARAMETER ResourceGroupName
     Name of the resource group the solution was deployed into. Required when not
-    using azd.
+    using azd (also used for auto-discovery of the ACR/App Service names).
 .PARAMETER AcrName
-    Name of the Azure Container Registry. Required when not using azd.
+    Name of the Azure Container Registry. Auto-discovered from the resource group
+    when omitted (assumes a single ACR in the group).
 .PARAMETER AcrLoginServer
     Login server of the ACR (defaults to "<AcrName>.azurecr.io" if omitted).
 .PARAMETER ApiAppName
-    Name of the API App Service. Required when not using azd.
+    Name of the API App Service. Auto-discovered from the resource group when
+    omitted (matches an app whose name starts with "api-").
 .PARAMETER FrontendAppName
-    Name of the frontend App Service. Required when not using azd.
+    Name of the frontend App Service. Auto-discovered from the resource group
+    when omitted (matches an app whose name starts with "app-").
 .PARAMETER BackendImageName
     Backend image name (defaults to "km-api").
 .PARAMETER BackendImageTag
@@ -34,7 +40,10 @@
     # azd-based deployment (values resolved automatically from azd environment)
     ./infra/scripts/build/build_and_push_images.ps1
 .EXAMPLE
-    # AVM / non-azd deployment (explicit parameters)
+    # AVM / non-azd deployment (ACR/App Services auto-discovered from the resource group)
+    ./infra/scripts/build/build_and_push_images.ps1 -ResourceGroupName "my-rg"
+.EXAMPLE
+    # AVM / non-azd deployment (explicit parameters, e.g. multiple ACRs/apps in the group)
     ./infra/scripts/build/build_and_push_images.ps1 `
         -ResourceGroupName "my-rg" `
         -AcrName "kmcontainerreg" `
@@ -68,6 +77,22 @@ function Get-AzdValue([string]$key) {
     return $val.Trim()
 }
 
+# ── Auto-discovery helpers (non-azd / AVM-based deployments): resolve names from the
+#    resource group when not supplied explicitly and not available via azd. ──
+function Get-DiscoveredAcrName([string]$rg) {
+    if (-not $rg) { return "" }
+    $names = (az acr list --resource-group $rg --query "[].name" -o tsv 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $names) { return "" }
+    return (($names -split "`n") | Where-Object { $_ } | Select-Object -First 1).Trim()
+}
+
+function Get-DiscoveredWebAppName([string]$rg, [string]$prefix) {
+    if (-not $rg) { return "" }
+    $names = (az webapp list --resource-group $rg --query "[].name" -o tsv 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $names) { return "" }
+    return (($names -split "`n") | Where-Object { $_ -like "$prefix*" } | Select-Object -First 1).Trim()
+}
+
 Write-Host ""
 Write-Host "===============================================" -ForegroundColor Cyan
 Write-Host "  Build & Push Container Images" -ForegroundColor Cyan
@@ -96,6 +121,11 @@ $frontendTag     = if ($FrontendImageTag) { $FrontendImageTag } else { Get-AzdVa
 $backendApp      = if ($ApiAppName) { $ApiAppName } else { Get-AzdValue "API_APP_NAME" }
 $frontendApp     = if ($FrontendAppName) { $FrontendAppName } else { Get-AzdValue "FRONTEND_APP_NAME" }
 
+# ── Auto-discovery from the resource group (used when azd is unavailable/didn't resolve a value) ──
+if (-not $acrName)    { $acrName    = Get-DiscoveredAcrName $resourceGroup }
+if (-not $backendApp) { $backendApp = Get-DiscoveredWebAppName $resourceGroup "api-" }
+if (-not $frontendApp) { $frontendApp = Get-DiscoveredWebAppName $resourceGroup "app-" }
+
 # ── Fallbacks / defaults ──
 if (-not $acrLoginServer -and $acrName) { $acrLoginServer = "$acrName.azurecr.io" }
 if (-not $backendImage)  { $backendImage  = "km-api" }
@@ -109,7 +139,8 @@ if (-not $acrName -or -not $backendApp -or -not $frontendApp) {
         Write-Host "       Ensure 'azd provision' (or 'azd up') has completed for this environment," -ForegroundColor Yellow
         Write-Host "       or pass -AcrName, -ApiAppName and -FrontendAppName explicitly." -ForegroundColor Yellow
     } else {
-        Write-Host "       azd was not detected. Pass -ResourceGroupName, -AcrName, -ApiAppName and -FrontendAppName explicitly." -ForegroundColor Yellow
+        Write-Host "       Auto-discovery from -ResourceGroupName '$resourceGroup' did not find them (expects a single ACR and" -ForegroundColor Yellow
+        Write-Host "       App Services named 'api-*'/'app-*'). Pass -AcrName, -ApiAppName and -FrontendAppName explicitly." -ForegroundColor Yellow
         Write-Host "       Example: ./infra/scripts/build/build_and_push_images.ps1 -ResourceGroupName '<rg>' -AcrName '<acr>' -ApiAppName '<api-app>' -FrontendAppName '<frontend-app>'" -ForegroundColor Yellow
     }
     exit 1
